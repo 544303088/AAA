@@ -1,0 +1,199 @@
+# =======================
+# 参数定义
+# =======================
+set CUT 64
+set CONTACT_SIZE_X 0.09
+set CONTACT_SIZE_Y 0.09
+set CONTACT_PITCH_X 0.23
+set CONTACT_PITCH_Y 0.23
+set CONTACT_MARGIN_LEFT 0.04
+set CONTACT_MARGIN_RIGHT 0.04
+set CONTACT_MARGIN_BOTTOM 0.04
+set CONTACT_MARGIN_TOP 0.04
+
+set VIA1X_SIZE_X 0.10
+set VIA1X_SIZE_Y 0.10
+set VIA1X_PITCH_X 0.20
+set VIA1X_PITCH_Y 0.20
+set VIA1X_MARGIN_LEFT 0.05
+set VIA1X_MARGIN_RIGHT 0.05
+set VIA1X_MARGIN_BOTTOM 0.05
+set VIA1X_MARGIN_TOP 0.05
+
+set VIA4X_SIZE_X 0.36
+set VIA4X_SIZE_Y 0.36
+set VIA4X_PITCH_X 0.72
+set VIA4X_PITCH_Y 0.72
+set VIA4X_MARGIN_LEFT 0.1
+set VIA4X_MARGIN_RIGHT 0.1
+set VIA4X_MARGIN_BOTTOM 0.1
+set VIA4X_MARGIN_TOP 0.1
+
+set UTMVIA_SIZE_X 0.8
+set UTMVIA_SIZE_Y 0.8
+set UTMVIA_PITCH_X 1.6
+set UTMVIA_PITCH_Y 1.6
+set UTMVIA_MARGIN_LEFT 0.2
+set UTMVIA_MARGIN_RIGHT 0.2
+set UTMVIA_MARGIN_BOTTOM 0.2
+set UTMVIA_MARGIN_TOP 0.2
+
+# =======================
+# 基础函数
+# =======================
+proc um2dbu {val dbu} {
+    return [expr {int(round($val / $dbu))}]
+}
+
+proc create_box {cell layer left bottom width height dbu} {
+    set x1 [um2dbu $left $dbu]
+    set y1 [um2dbu $bottom $dbu]
+    set x2 [um2dbu [expr {$left + $width}] $dbu]
+    set y2 [um2dbu [expr {$bottom + $height}] $dbu]
+    dbCreateRect $cell $layer $x1 $y1 $x2 $y2
+}
+
+proc create_label {cell layer x y text dbu} {
+    set x_dbu [um2dbu $x $dbu]
+    set y_dbu [um2dbu $y $dbu]
+    dbCreateLabel $cell $layer $x_dbu $y_dbu $text
+}
+
+# 生成正八边形点集
+proc octagon_points {cx cy w n} {
+    set pts {}
+    set r [expr {$w/2.0}]
+    for {set i 0} {$i < $n} {incr i} {
+        set angle [expr {2.0 * 3.1415926 * $i / $n}]
+        set x [expr {$cx + $r * cos($angle)}]
+        set y [expr {$cy + $r * sin($angle)}]
+        lappend pts $x $y
+    }
+    return $pts
+}
+
+# 生成圆角矩形点集
+proc rounded_rect_points {cx cy w h r n_arc} {
+    set pts {}
+    set corners [list [list [expr {$cx+$w/2-$r}] [expr {$cy+$h/2-$r}]] \
+                     [list [expr {$cx-$w/2+$r}] [expr {$cy+$h/2-$r}]] \
+                     [list [expr {$cx-$w/2+$r}] [expr {$cy-$h/2+$r}]] \
+                     [list [expr {$cx+$w/2-$r}] [expr {$cy-$h/2+$r}]]]
+    set angles {0 [expr {3.1415926/2}] 3.1415926 [expr {3*3.1415926/2}]}
+    for {set i 0} {$i < 4} {incr i} {
+        set cx0 [lindex $corners $i 0]
+        set cy0 [lindex $corners $i 1]
+        set start_angle [lindex $angles $i]
+        for {set j 0} {$j <= $n_arc} {incr j} {
+            set theta [expr {$start_angle + $j * (3.1415926/2) / $n_arc}]
+            set x [expr {$cx0 + $r * cos($theta)}]
+            set y [expr {$cy0 + $r * sin($theta)}]
+            lappend pts $x $y
+        }
+    }
+    return $pts
+}
+
+# 画多边形
+proc create_polygon {cell layer pts dbu} {
+    set dbu_pts {}
+    foreach {x y} $pts {
+        lappend dbu_pts [um2dbu $x $dbu] [um2dbu $y $dbu]
+    }
+    dbCreatePolygon $cell $layer $dbu_pts
+}
+
+# 画环形（外多边形-内多边形）
+proc create_ring {cell layer cx cy in_w in_h out_w out_h shape_type npoints corner_radius dbu} {
+    if {$shape_type == "octagon"} {
+        set pts_out [octagon_points $cx $cy $out_w $npoints]
+        set pts_in [octagon_points $cx $cy $in_w $npoints]
+    } elseif {$shape_type == "rounded_rect"} {
+        set pts_out [rounded_rect_points $cx $cy $out_w $out_h $corner_radius 8]
+        set pts_in [rounded_rect_points $cx $cy $in_w $in_h $corner_radius 8]
+    } else {
+        # 默认矩形
+        set pts_out [list [expr {$cx-$out_w/2}] [expr {$cy-$out_h/2}] [expr {$cx+$out_w/2}] [expr {$cy-$out_h/2}] [expr {$cx+$out_w/2}] [expr {$cy+$out_h/2}] [expr {$cx-$out_w/2}] [expr {$cy+$out_h/2}]]
+        set pts_in [list [expr {$cx-$in_w/2}] [expr {$cy-$in_h/2}] [expr {$cx+$in_w/2}] [expr {$cy-$in_h/2}] [expr {$cx+$in_w/2}] [expr {$cy+$in_h/2}] [expr {$cx-$in_w/2}] [expr {$cy+$in_h/2}]]
+    }
+    # 外多边形
+    create_polygon $cell $layer $pts_out $dbu
+    # 内多边形（用负极性或后续布尔操作实现挖空）
+    # Laker不支持直接布尔减法，建议用不同layer后续布尔处理
+    # 或者用dbCreateDonut（如果有）
+}
+
+# =======================
+# 读取CSV
+# =======================
+set csv_file "" ;# 这里填写你的CSV文件路径
+set fp [open $csv_file r]
+set header [gets $fp]
+set columns [split $header ","]
+set row_idx 0
+
+# =======================
+# 主流程
+# =======================
+# 假设dbu为0.001（1nm），实际请用layout的dbu
+set dbu 0.001
+
+# 创建标准cell（以contact为例）
+set contact_cell [dbCreateCell "contact_p09"]
+create_box $contact_cell "CONTACT" 0 0 $CONTACT_SIZE_X $CONTACT_SIZE_Y $dbu
+
+set via1_cell [dbCreateCell "via1_p10"]
+create_box $via1_cell "VIA1" 0 0 $VIA1X_SIZE_X $VIA1X_SIZE_Y $dbu
+
+set via2_cell [dbCreateCell "via2_p10"]
+create_box $via2_cell "VIA2" 0 0 $VIA1X_SIZE_X $VIA1X_SIZE_Y $dbu
+
+set via3_cell [dbCreateCell "via3_p10"]
+create_box $via3_cell "VIA3" 0 0 $VIA1X_SIZE_X $VIA1X_SIZE_Y $dbu
+
+set via4_cell [dbCreateCell "via4_p36"]
+create_box $via4_cell "VIA4" 0 0 $VIA4X_SIZE_X $VIA4X_SIZE_Y $dbu
+
+set via5_cell [dbCreateCell "via5_p80"]
+create_box $via5_cell "VIA5" 0 0 $UTMVIA_SIZE_X $UTMVIA_SIZE_Y $dbu
+
+# 逐行读取CSV
+while {[gets $fp line] >= 0} {
+    incr row_idx
+    set fields [split $line ","]
+    set cell_1_name [lindex $fields 0]
+    set diff1_w [lindex $fields 10]
+    set diff1_h [lindex $fields 11]
+    set diff1_cutoff [lindex $fields 8]
+    set diff1_text [lindex $fields 50]
+    set top_x [lindex $fields 55]
+    set top_y [lindex $fields 56]
+    set top_scale [lindex $fields 57]
+    set top_angle [lindex $fields 58]
+    # ... 依次读取所有需要的参数
+
+    set cell_1 [dbCreateCell $cell_1_name]
+
+    # 画diff1八边形
+    set pts [octagon_points 0 0 $diff1_w $CUT]
+    create_polygon $cell_1 "DIFF1" $pts $dbu
+    create_label $cell_1 "TEXT" 0 0 $diff1_text $dbu
+
+    # 画diff2环形（八边形环）
+    # create_ring $cell_1 "DIFF2" 0 0 $diff1_w $diff1_h [expr {$diff1_w+2.0}] [expr {$diff1_h+2.0}] "octagon" $CUT $diff1_cutoff $dbu
+
+    # 画圆角矩形
+    # set pts2 [rounded_rect_points 0 0 $diff1_w $diff1_h 0.2 8]
+    # create_polygon $cell_1 "DIFF1_RRECT" $pts2 $dbu
+
+    # 画metal、via阵列等，可用fill_with_vias
+    # ...
+
+    set top_cell [dbCreateCell "TOP"]
+    set x_dbu [um2dbu $top_x $dbu]
+    set y_dbu [um2dbu $top_y $dbu]
+    dbCreateInst $top_cell $cell_1 $x_dbu $y_dbu $top_angle $top_scale
+}
+close $fp
+
+puts "脚本执行完毕！" 
