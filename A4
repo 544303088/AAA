@@ -1,0 +1,234 @@
+import pya
+
+def fill_region_with_via_arrays(layout, cell, region, via_cell, spacing_x, spacing_y, margin=0):
+    """
+    在指定region中用via cell填充，优先使用array以减少文件大小
+    
+    参数:
+    - layout: pya.Layout对象
+    - cell: 目标cell
+    - region: pya.Region对象，填充区域
+    - via_cell: via的cell对象
+    - spacing_x: X方向间距 (单位: DBU)
+    - spacing_y: Y方向间距 (单位: DBU)  
+    - margin: 边缘余量 (单位: DBU)
+    """
+    
+    # 获取via cell的边界框
+    via_bbox = via_cell.bbox()
+    via_width = via_bbox.width()
+    via_height = via_bbox.height()
+    
+    # 处理region中的每个多边形
+    for polygon in region.each():
+        fill_polygon_with_arrays(layout, cell, polygon, via_cell, 
+                               via_width, via_height, spacing_x, spacing_y, margin)
+
+def fill_polygon_with_arrays(layout, cell, polygon, via_cell, via_width, via_height, 
+                           spacing_x, spacing_y, margin):
+    """
+    在单个多边形中填充via arrays
+    """
+    bbox = polygon.bbox()
+    
+    # 计算填充区域（考虑margin）
+    fill_left = bbox.left + margin + via_width // 2
+    fill_right = bbox.right - margin - via_width // 2
+    fill_bottom = bbox.bottom + margin + via_height // 2
+    fill_top = bbox.top - margin - via_height // 2
+    
+    if fill_left >= fill_right or fill_bottom >= fill_top:
+        return  # 区域太小，无法填充
+    
+    # 计算网格
+    step_x = via_width + spacing_x
+    step_y = via_height + spacing_y
+    
+    # 计算可放置的via数量
+    nx = max(1, int((fill_right - fill_left) / step_x) + 1)
+    ny = max(1, int((fill_top - fill_bottom) / step_y) + 1)
+    
+    # 生成候选位置
+    positions = []
+    for i in range(nx):
+        for j in range(ny):
+            x = fill_left + i * step_x
+            y = fill_bottom + j * step_y
+            
+            if x <= fill_right and y <= fill_top:
+                # 检查位置是否在多边形内
+                point = pya.Point(x, y)
+                if polygon.inside(point):
+                    positions.append((x, y))
+    
+    if not positions:
+        return
+    
+    # 将位置分组为矩形数组以优化
+    arrays = group_positions_into_arrays(positions, step_x, step_y)
+    
+    # 插入数组
+    for array_info in arrays:
+        insert_via_array(cell, via_cell, array_info)
+
+def group_positions_into_arrays(positions, step_x, step_y):
+    """
+    将位置分组为矩形数组以减少实例数量
+    """
+    if not positions:
+        return []
+    
+    # 按坐标排序
+    positions = sorted(positions)
+    used = set()
+    arrays = []
+    
+    for pos in positions:
+        if pos in used:
+            continue
+            
+        x0, y0 = pos
+        
+        # 寻找从当前位置开始的最大矩形数组
+        max_array = find_max_rectangular_array(positions, pos, step_x, step_y, used)
+        
+        if max_array:
+            arrays.append(max_array)
+            # 标记已使用的位置
+            x_start, y_start, nx, ny = max_array
+            for i in range(nx):
+                for j in range(ny):
+                    used.add((x_start + i * step_x, y_start + j * step_y))
+    
+    return arrays
+
+def find_max_rectangular_array(positions, start_pos, step_x, step_y, used):
+    """
+    从给定位置开始寻找最大的矩形数组
+    """
+    pos_set = set(positions)
+    x_start, y_start = start_pos
+    
+    if start_pos in used:
+        return None
+    
+    # 寻找X方向的最大长度
+    max_nx = 1
+    x = x_start + step_x
+    while (x, y_start) in pos_set and (x, y_start) not in used:
+        max_nx += 1
+        x += step_x
+    
+    # 寻找Y方向的最大长度
+    max_ny = 1
+    for nx in range(1, max_nx + 1):
+        ny = 1
+        y = y_start + step_y
+        
+        # 检查这一行是否完整
+        row_complete = True
+        for i in range(nx):
+            if (x_start + i * step_x, y) not in pos_set or (x_start + i * step_x, y) in used:
+                row_complete = False
+                break
+        
+        if row_complete:
+            # 继续检查更多行
+            temp_ny = ny + 1
+            while True:
+                y_next = y_start + temp_ny * step_y
+                row_complete = True
+                for i in range(nx):
+                    if ((x_start + i * step_x, y_next) not in pos_set or 
+                        (x_start + i * step_x, y_next) in used):
+                        row_complete = False
+                        break
+                
+                if row_complete:
+                    temp_ny += 1
+                else:
+                    break
+            
+            if nx * (temp_ny - 1) > max_nx * max_ny:
+                max_nx = nx
+                max_ny = temp_ny - 1
+    
+    return (x_start, y_start, max_nx, max_ny) if max_nx * max_ny > 0 else None
+
+def insert_via_array(cell, via_cell, array_info):
+    """
+    插入via数组
+    """
+    x_start, y_start, nx, ny = array_info
+    
+    if nx == 1 and ny == 1:
+        # 单个实例
+        trans = pya.Trans(pya.Point(x_start, y_start))
+        cell.insert(pya.CellInstArray(via_cell.cell_index(), trans))
+    else:
+        # 数组实例
+        trans = pya.Trans(pya.Point(x_start, y_start))
+        
+        # 获取via的spacing
+        via_bbox = via_cell.bbox()
+        step_x = via_bbox.width() + spacing_x  # 需要从外部获取spacing
+        step_y = via_bbox.height() + spacing_y
+        
+        # 创建数组
+        if nx > 1 and ny > 1:
+            # 2D数组
+            array = pya.CellInstArray(via_cell.cell_index(), trans,
+                                   pya.Vector(step_x, 0), pya.Vector(0, step_y),
+                                   nx, ny)
+        elif nx > 1:
+            # X方向数组
+            array = pya.CellInstArray(via_cell.cell_index(), trans,
+                                   pya.Vector(step_x, 0), pya.Vector(0, 0),
+                                   nx, 1)
+        else:
+            # Y方向数组
+            array = pya.CellInstArray(via_cell.cell_index(), trans,
+                                   pya.Vector(0, 0), pya.Vector(0, step_y),
+                                   1, ny)
+        
+        cell.insert(array)
+
+# 使用示例
+def example_usage():
+    """
+    使用示例
+    """
+    # 创建layout和cell
+    layout = pya.Layout()
+    layout.dbu = 0.001  # 设置数据库单位为1nm
+    
+    top_cell = layout.create_cell("TOP")
+    via_cell = layout.create_cell("VIA")
+    
+    # 创建一个简单的via形状
+    layer_idx = layout.layer(1, 0)
+    via_shape = pya.Box(0, 0, 100, 100)  # 100nm x 100nm的via
+    via_cell.shapes(layer_idx).insert(via_shape)
+    
+    # 定义填充区域
+    fill_region = pya.Region()
+    # 添加一个矩形区域
+    fill_poly = pya.Polygon(pya.Box(0, 0, 2000, 1500))  # 2μm x 1.5μm
+    fill_region.insert(fill_poly)
+    
+    # 设置间距和边缘余量
+    spacing_x = 50   # 50nm X间距
+    spacing_y = 50   # 50nm Y间距  
+    margin = 100     # 100nm边缘余量
+    
+    # 执行填充
+    fill_region_with_via_arrays(layout, top_cell, fill_region, via_cell,
+                              spacing_x, spacing_y, margin)
+    
+    # 保存文件
+    layout.write("via_filled.gds")
+    print("Via填充完成，文件已保存为 via_filled.gds")
+
+# 运行示例
+if __name__ == "__main__":
+    example_usage()
