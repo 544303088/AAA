@@ -1,0 +1,743 @@
+import pya
+import pandas as pd
+import math
+
+# =======================
+# 参数定义
+# =======================
+PPLUS_LAYER = (11, 0)
+TEXT_LAYER = (85, 0)
+CONTACT_LAYER = (39, 0)
+METAL1_LAYER = (46, 0)
+METAL2_LAYER = (48, 0)
+METAL3_LAYER = (50, 0)
+METAL4_LAYER = (52, 0)
+METAL5_LAYER = (54, 0)
+METAL6_LAYER = (56, 0)
+
+VIA1_LAYER = (47, 0)
+VIA2_LAYER = (49, 0)
+VIA3_LAYER = (51, 0)
+VIA4_LAYER = (53, 0)
+VIA5_LAYER = (55, 0)
+
+CONTACT_SIZE_X = 0.09
+CONTACT_SIZE_Y = 0.09
+CONTACT_PITCH_X = 0.23
+CONTACT_PITCH_Y = 0.23
+CONTACT_MARGIN_LEFT = 0.04
+CONTACT_MARGIN_RIGHT = 0.04
+CONTACT_MARGIN_BOTTOM = 0.04
+CONTACT_MARGIN_TOP = 0.04
+
+VIA1X_SIZE_X = 0.10
+VIA1X_SIZE_Y = 0.10
+VIA1X_PITCH_X = 0.20
+VIA1X_PITCH_Y = 0.20
+VIA1X_MARGIN_LEFT = 0.05
+VIA1X_MARGIN_RIGHT = 0.05
+VIA1X_MARGIN_BOTTOM = 0.05
+VIA1X_MARGIN_TOP = 0.05
+
+VIA4X_SIZE_X = 0.36
+VIA4X_SIZE_Y = 0.36
+VIA4X_PITCH_X = 0.72
+VIA4X_PITCH_Y = 0.72
+VIA4X_MARGIN_LEFT = 0.1
+VIA4X_MARGIN_RIGHT = 0.1
+VIA4X_MARGIN_BOTTOM = 0.1
+VIA4X_MARGIN_TOP = 0.1
+
+UTMVIA_SIZE_X = 0.8
+UTMVIA_SIZE_Y = 0.8
+UTMVIA_PITCH_X = 1.6
+UTMVIA_PITCH_Y = 1.6
+UTMVIA_MARGIN_LEFT = 0.2
+UTMVIA_MARGIN_RIGHT = 0.2
+UTMVIA_MARGIN_BOTTOM = 0.2
+UTMVIA_MARGIN_TOP = 0.2
+
+# =======================
+# 基础函数
+# =======================
+def um2dbu(val, dbu):
+    return int(round(float(val) / dbu))
+
+def create_box(left, bottom, width, height, layer, cell, dbu):
+    box = pya.Box(
+        um2dbu(left, dbu),
+        um2dbu(bottom, dbu),
+        um2dbu(left + width, dbu),
+        um2dbu(bottom + height, dbu)
+    )
+    cell.shapes(layer).insert(box)
+    return box
+
+def create_standard_cell(layout, dbu, cell_name, layer_info, size_x, size_y):
+    cell = layout.cell(cell_name)
+    if cell:
+        return cell
+    cell = layout.create_cell(cell_name)
+    # Check if layer_info is valid
+    if not isinstance(layer_info, tuple) or len(layer_info) != 2:
+         print(f"Error: Invalid layer_info format for cell '{cell_name}': {layer_info}")
+         return cell # Return empty cell on error
+    layer = layout.layer(*layer_info)
+    if layer is None:
+         print(f"Error: Could not get layer object for {layer_info} for cell '{cell_name}") # Corrected string termination
+         return cell # Return empty cell on error
+
+    size_x_dbu = um2dbu(size_x, dbu)
+    size_y_dbu = um2dbu(size_y, dbu)
+
+    box = pya.Box(
+        -size_x_dbu // 2,
+        -size_y_dbu // 2,
+        size_x_dbu // 2 + (size_x_dbu % 2),
+        size_y_dbu // 2 + (size_y_dbu % 2)
+    )
+    cell.shapes(layer).insert(box)
+    return cell
+
+def fill_with_vias(region, via_cell, cell, dbu, via_size_x, via_size_y, x_pitch, y_pitch, margin_left, margin_right, margin_bottom, margin_top):
+    bbox = region.bbox()
+
+    x_min_fill_dbu = bbox.left + um2dbu(margin_left, dbu)
+    x_max_fill_dbu = bbox.right - um2dbu(margin_right, dbu)
+    y_min_fill_dbu = bbox.bottom + um2dbu(margin_bottom, dbu)
+    y_max_fill_dbu = bbox.top - um2dbu(margin_top, dbu)
+
+    via_size_x_dbu = um2dbu(via_size_x, dbu)
+    via_size_y_dbu = um2dbu(via_size_y, dbu)
+    x_pitch_dbu = um2dbu(x_pitch, dbu)
+    y_pitch_dbu = um2dbu(y_pitch, dbu)
+    via_half_size_x_dbu = via_size_x_dbu // 2
+    via_half_size_y_dbu = via_size_y_dbu // 2
+
+    x_start_center = x_min_fill_dbu + via_half_size_x_dbu
+    x_end_center = x_max_fill_dbu - via_half_size_x_dbu
+    y_start_center = y_min_fill_dbu + via_half_size_y_dbu
+    y_end_center = y_max_fill_dbu - via_half_size_y_dbu
+
+    n_x = 0
+    if x_pitch_dbu > 0 and x_end_center >= x_start_center:
+        n_x = int((x_end_center - x_start_center) // x_pitch_dbu) + 1
+    elif x_pitch_dbu == 0 and x_end_center >= x_start_center:
+        n_x = 1
+
+    n_y = 0
+    if y_pitch_dbu > 0 and y_end_center >= y_start_center:
+         n_y = int((y_end_center - y_start_center) // y_pitch_dbu) + 1
+    elif y_pitch_dbu == 0 and y_end_center >= y_start_center:
+         n_y = 1
+
+    if n_x <= 0 or n_y <= 0:
+        return
+
+    actual_total_x_dbu = (n_x - 1) * x_pitch_dbu
+    actual_total_y_dbu = (n_y - 1) * y_pitch_dbu
+
+    center_fill_x_dbu = (x_min_fill_dbu + x_max_fill_dbu) // 2
+    center_fill_y_dbu = (y_min_fill_dbu + y_max_fill_dbu) // 2
+
+    array_center_x_dbu = x_start_center + actual_total_x_dbu // 2
+    array_center_y_dbu = y_start_center + actual_total_y_dbu // 2
+
+    offset_center_x_dbu = center_fill_x_dbu - array_center_x_dbu
+    offset_center_y_dbu = center_fill_y_dbu - array_center_y_dbu
+
+    final_x0_dbu = x_start_center + offset_center_x_dbu
+    final_y0_dbu = y_start_center + offset_center_y_dbu
+
+    for i in range(n_x):
+        for j in range(n_y):
+            x = final_x0_dbu + i * x_pitch_dbu
+            y = final_y0_dbu + j * y_pitch_dbu
+
+            via_box = pya.Box(
+                x - via_half_size_x_dbu,
+                y - via_half_size_y_dbu,
+                x + via_half_size_x_dbu + (via_size_x_dbu % 2),
+                y + via_half_size_y_dbu + (via_size_y_dbu % 2)
+            )
+            via_region = pya.Region(via_box)
+
+            if (via_region - region).is_empty():
+                cell.insert(pya.CellInstArray(
+                    via_cell.cell_index(),
+                    pya.Trans(pya.Point(x, y))
+                ))
+
+def clear_cell(cell):
+    cell.clear()
+
+def create_solid_shape(center, w, h, layer, dbu, shape_type='rec', npoints=64, corner_radius=None, offset=0):
+    def rounded_rect_points(center, w, h, r, n_arc=8):
+        cx, cy = center
+        r = min(r, w/2, h/2)
+        corners = [
+            (cx + w/2 - r, cy + h/2 - r),
+            (cx - w/2 + r, cy + h/2 - r),
+            (cx - w/2 + r, cy - h/2 + r),
+            (cx + w/2 - r, cy - h/2 + r),
+        ]
+        angles = [0, math.pi/2, math.pi, 3*math.pi/2]
+        points = []
+        for i in range(4):
+            cx0, cy0 = corners[i]
+            start_angle = angles[i]
+            for j in range(n_arc+1):
+                theta = start_angle + j * (math.pi/2) / n_arc
+                x = cx0 + r * math.cos(theta)
+                y = cy0 + r * math.sin(theta)
+                points.append((x, y))
+        return points
+    if corner_radius is not None and shape_type in ['racetrack_cir', 'racetrack_oct']:
+        r = min(w, h) / 2
+        npoints = max(8, int(round(2 * 3.1415926 * r / corner_radius)))
+    if shape_type == 'racetrack_cir':
+        r = corner_radius if corner_radius is not None else min(w, h) / 2
+        n_arc = max(4, 64)  # 固定64段
+        pts = rounded_rect_points(center, w, h, r, n_arc)
+        poly = pya.Polygon([pya.Point(um2dbu(x, dbu), um2dbu(y, dbu)) for x, y in pts])
+        region = pya.Region(poly)
+    elif shape_type == 'racetrack_oct':
+        # 生成拉长的正八边形，w和h可不等，切角斜边与中间边长相等
+        cx, cy = center
+        # 计算切角直角边长x，使得中间边长=斜边
+        x_w = w / (2 + math.sqrt(2))
+        x_h = h / (2 + math.sqrt(2))
+        x = min(x_w, x_h)
+        half_w = w / 2
+        half_h = h / 2
+        pts = [
+            (cx - half_w + x, cy + half_h),
+            (cx + half_w - x, cy + half_h),
+            (cx + half_w, cy + half_h - x),
+            (cx + half_w, cy - half_h + x),
+            (cx + half_w - x, cy - half_h),
+            (cx - half_w + x, cy - half_h),
+            (cx - half_w, cy - half_h + x),
+            (cx - half_w, cy + half_h - x),
+        ]
+        poly = pya.Polygon([pya.Point(um2dbu(x0, dbu), um2dbu(y0, dbu)) for x0, y0 in pts])
+        region = pya.Region(poly)
+    else:
+        box = pya.Box(
+            um2dbu(center[0] - w/2, dbu),
+            um2dbu(center[1] - h/2, dbu),
+            um2dbu(center[0] + w/2, dbu),
+            um2dbu(center[1] + h/2, dbu)
+        )
+        region = pya.Region(box)
+    return region
+
+def create_ring(center, in_w, in_h, out_w, out_h, layer, dbu, shape_type='rec', npoints=64, corner_radius=None, offset=0):
+    def rounded_rect_points(center, w, h, r, n_arc=8):
+        cx, cy = center
+        r = min(r, w/2, h/2)
+        corners = [
+            (cx + w/2 - r, cy + h/2 - r),
+            (cx - w/2 + r, cy + h/2 - r),
+            (cx - w/2 + r, cy - h/2 + r),
+            (cx + w/2 - r, cy - h/2 + r),
+        ]
+        angles = [0, math.pi/2, math.pi, 3*math.pi/2]
+        points = []
+        for i in range(4):
+            cx0, cy0 = corners[i]
+            start_angle = angles[i]
+            for j in range(n_arc+1):
+                theta = start_angle + j * (math.pi/2) / n_arc
+                x = cx0 + r * math.cos(theta)
+                y = cy0 + r * math.sin(theta)
+                points.append((x, y))
+        return points
+    if corner_radius is not None and shape_type in ['racetrack_cir', 'racetrack_oct']:
+        r = min(out_w, out_h) / 2
+        npoints = max(8, int(round(2 * 3.1415926 * r / corner_radius)))
+    if shape_type == 'racetrack_cir':
+        r_in = corner_radius if corner_radius is not None else min(in_w, in_h) / 2
+        width = (out_w - in_w) / 2
+        r_out = r_in + width
+        n_arc = max(4, 64)  # 固定64段
+        pts_out = rounded_rect_points(center, out_w, out_h, r_out, n_arc)
+        pts_in = rounded_rect_points(center, in_w, in_h, r_in, n_arc)
+        outer_poly = pya.Polygon([pya.Point(um2dbu(x, dbu), um2dbu(y, dbu)) for x, y in pts_out])
+        inner_poly = pya.Polygon([pya.Point(um2dbu(x, dbu), um2dbu(y, dbu)) for x, y in pts_in])
+        outer_region = pya.Region(outer_poly)
+        inner_region = pya.Region(inner_poly)
+        ring = outer_region - inner_region
+        return ring
+    elif shape_type == 'racetrack_oct':
+        # 生成拉长的正八边形环，w和h可不等，切角斜边与中间边长相等，环宽度一致
+        cx, cy = center
+        # 内八边形切角
+        x_in_w = in_w / (2 + math.sqrt(2))
+        x_in_h = in_h / (2 + math.sqrt(2))
+        x_in = min(x_in_w, x_in_h)
+        # 外八边形切角
+        x_out_w = out_w / (2 + math.sqrt(2))
+        x_out_h = out_h / (2 + math.sqrt(2))
+        x_out = min(x_out_w, x_out_h)
+        # 也可以用 x_out = x_in + (out_w-in_w)/2 或 (out_h-in_h)/2，但此法更美观
+        half_in_w = in_w / 2
+        half_in_h = in_h / 2
+        half_out_w = out_w / 2
+        half_out_h = out_h / 2
+        pts_in = [
+            (cx - half_in_w + x_in, cy + half_in_h),
+            (cx + half_in_w - x_in, cy + half_in_h),
+            (cx + half_in_w, cy + half_in_h - x_in),
+            (cx + half_in_w, cy - half_in_h + x_in),
+            (cx + half_in_w - x_in, cy - half_in_h),
+            (cx - half_in_w + x_in, cy - half_in_h),
+            (cx - half_in_w, cy - half_in_h + x_in),
+            (cx - half_in_w, cy + half_in_h - x_in),
+        ]
+        pts_out = [
+            (cx - half_out_w + x_out, cy + half_out_h),
+            (cx + half_out_w - x_out, cy + half_out_h),
+            (cx + half_out_w, cy + half_out_h - x_out),
+            (cx + half_out_w, cy - half_out_h + x_out),
+            (cx + half_out_w - x_out, cy - half_out_h),
+            (cx - half_out_w + x_out, cy - half_out_h),
+            (cx - half_out_w, cy - half_out_h + x_out),
+            (cx - half_out_w, cy + half_out_h - x_out),
+        ]
+        poly_out = pya.Polygon([pya.Point(um2dbu(x0, dbu), um2dbu(y0, dbu)) for x0, y0 in pts_out])
+        poly_in = pya.Polygon([pya.Point(um2dbu(x0, dbu), um2dbu(y0, dbu)) for x0, y0 in pts_in])
+        outer_region = pya.Region(poly_out)
+        inner_region = pya.Region(poly_in)
+        ring = outer_region - inner_region
+        return ring
+    else:
+        outer_box = pya.Box(
+            um2dbu(center[0] - out_w/2, dbu),
+            um2dbu(center[1] - out_h/2, dbu),
+            um2dbu(center[0] + out_w/2, dbu),
+            um2dbu(center[1] + out_h/2, dbu)
+        )
+        inner_box = pya.Box(
+            um2dbu(center[0] - in_w/2, dbu),
+            um2dbu(center[1] - in_h/2, dbu),
+            um2dbu(center[0] + in_w/2, dbu),
+            um2dbu(center[1] + in_h/2, dbu)
+        )
+        outer_region = pya.Region(outer_box)
+        inner_region = pya.Region(inner_box)
+    ring = outer_region - inner_region
+    return ring
+
+def create_text_label(cell, layer_info, center_um, text_string, dbu, align="center", magnification=1.0, angle_deg=0.0):
+    layer = cell.layout().layer(layer_info)
+    center_dbu_x = um2dbu(center_um[0], dbu)
+    center_dbu_y = um2dbu(center_um[1], dbu)
+    temp_text = pya.Text(text_string, pya.Trans(1.0, 1.0))
+    bbox = temp_text.bbox()
+    offset_x = 0
+    offset_y = 0
+    if align.lower() == "left":
+        offset_x = -bbox.left
+        offset_y = -bbox.center().y
+    elif align.lower() == "right":
+        offset_x = -bbox.right
+        offset_y = -bbox.center().y
+    elif align.lower() == "bottom":
+        offset_x = -bbox.center().x
+        offset_y = -bbox.bottom
+    elif align.lower() == "top":
+        offset_x = -bbox.center().x
+        offset_y = -bbox.top
+    elif align.lower() == "top_left":
+        offset_x = -bbox.left
+        offset_y = -bbox.top
+    elif align.lower() == "top_right":
+        offset_x = -bbox.right
+        offset_y = -bbox.top
+    elif align.lower() == "bottom_left":
+        offset_x = -bbox.left
+        offset_y = -bbox.bottom
+    elif align.lower() == "bottom_right":
+        offset_x = -bbox.right
+        offset_y = -bbox.bottom
+    else:
+        offset_x = -bbox.center().x
+        offset_y = -bbox.center().y
+
+    transform = pya.Trans(pya.Point(center_dbu_x + offset_x, center_dbu_y + offset_y))
+    final_trans = pya.Trans(pya.Point(center_dbu_x, center_dbu_y)) * pya.Trans(offset_x, offset_y)
+    final_text_obj = pya.Text(text_string, final_trans)
+    cell.shapes(layer).insert(final_text_obj)
+    return final_text_obj
+
+def metal_stack(region, start_metal, top_metal, cell, layout, dbu, via_cells):
+    metal_layers = {
+        'metal1': layout.layer(*METAL1_LAYER),
+        'metal2': layout.layer(*METAL2_LAYER),
+        'metal3': layout.layer(*METAL3_LAYER),
+        'metal4': layout.layer(*METAL4_LAYER),
+        'metal5': layout.layer(*METAL5_LAYER),
+        'metal6': layout.layer(*METAL6_LAYER),
+    }
+
+    metal_levels = ['metal1', 'metal2', 'metal3', 'metal4', 'metal5', 'metal6']
+    via_levels = ['via1', 'via2', 'via3', 'via4', 'via5']
+
+    try:
+        start_level_index = metal_levels.index(start_metal.lower())
+        top_level_index = metal_levels.index(top_metal.lower())
+    except ValueError:
+        print(f"Error: Invalid start_metal ('{start_metal}') or top_metal ('{top_metal}'). Must be 'metal1' to 'metal6'.")
+        return
+
+    if start_level_index > top_level_index:
+        print(f"Error: start_metal ('{start_metal}') cannot be higher than top_metal ('{top_metal}').")
+        return
+
+    current_region = region
+
+    for i in range(start_level_index, top_level_index + 1):
+        current_metal_name = metal_levels[i]
+        current_metal_layer = metal_layers[current_metal_name]
+
+        metal_region = current_region
+
+        cell.shapes(current_metal_layer).insert(metal_region)
+
+        if i < top_level_index:
+            current_via_name = via_levels[i]
+            current_via_cell = via_cells.get(current_via_name)
+            if current_via_cell is None:
+                continue # Skip via filling for this layer
+
+            via_fill_region = metal_region
+
+            if current_via_name == 'via4':
+                 # via4 connects metal4 to metal5, using VIA4X rules
+                 fill_with_vias(
+                     via_fill_region,
+                     current_via_cell,
+                     cell,
+                     dbu,
+                     VIA4X_SIZE_X, VIA4X_SIZE_Y, VIA4X_PITCH_X, VIA4X_PITCH_Y,
+                     VIA4X_MARGIN_LEFT, VIA4X_MARGIN_RIGHT, VIA4X_MARGIN_BOTTOM, VIA4X_MARGIN_TOP
+                 )
+                 current_region = metal_region
+            elif current_via_name == 'via5':
+                 # via5 connects metal5 to metal6, using UTMVIA rules
+                 fill_with_vias(
+                     via_fill_region,
+                     current_via_cell,
+                     cell,
+                     dbu,
+                     UTMVIA_SIZE_X, UTMVIA_SIZE_Y, UTMVIA_PITCH_X, UTMVIA_PITCH_Y,
+                     UTMVIA_MARGIN_LEFT, UTMVIA_MARGIN_RIGHT, UTMVIA_MARGIN_BOTTOM, UTMVIA_MARGIN_TOP
+                 )
+                 current_region = metal_region
+            else:
+                fill_with_vias(
+                    via_fill_region,
+                    current_via_cell,
+                    cell,
+                    dbu,
+                    VIA1X_SIZE_X, VIA1X_SIZE_Y, VIA1X_PITCH_X, VIA1X_PITCH_Y,
+                    VIA1X_MARGIN_LEFT, VIA1X_MARGIN_RIGHT, VIA1X_MARGIN_BOTTOM, VIA1X_MARGIN_TOP
+                )
+                current_region = metal_region
+
+        else:
+             current_region = metal_region
+
+# =======================
+# 主流程
+# =======================
+def main():
+    layout = pya.CellView.active().layout()
+    dbu = layout.dbu
+    df = pd.read_excel(r'C:/Users/Jinyu/OneDrive/桌面/Klayout/new_0523.xlsx')
+    df.columns = [str(col).strip().lower() for col in df.columns]
+    if not {'top_cell_name','top_x','top_y','top_scale','top_angle'}.issubset(set(df.columns)):
+        raise ValueError('Excel表格必须包含top_cell_name, top_x, top_y, top_scale, top_angle字段')
+    top_cell_name = str(df.iloc[0]['top_cell_name'])
+    top_cell = layout.cell(top_cell_name) or layout.create_cell(top_cell_name)
+    clear_cell(top_cell)
+
+    # 创建via/contact cell (移到循环外部，只创建一次)
+    contact_cell = create_standard_cell(layout, dbu, "contact_p09", CONTACT_LAYER, CONTACT_SIZE_X, CONTACT_SIZE_Y)
+    via1_cell = create_standard_cell(layout, dbu, "via1_p10", VIA1_LAYER, VIA1X_SIZE_X, VIA1X_SIZE_Y)
+    via2_cell = create_standard_cell(layout, dbu, "via2_p10", VIA2_LAYER, VIA1X_SIZE_X, VIA1X_SIZE_Y)
+    via3_cell = create_standard_cell(layout, dbu, "via3_p10", VIA3_LAYER, VIA1X_SIZE_X, VIA1X_SIZE_Y)
+    via4_cell = create_standard_cell(layout, dbu, "via4_p36", VIA4_LAYER, VIA4X_SIZE_X, VIA4X_SIZE_Y)
+    via5_cell = create_standard_cell(layout, dbu, "via5_p80", VIA5_LAYER, UTMVIA_SIZE_X, UTMVIA_SIZE_Y)
+
+    via_cells = {
+        'via1': via1_cell,
+        'via2': via2_cell,
+        'via3': via3_cell,
+        'via4': via4_cell,
+        'via5': via5_cell,
+    }
+
+    for idx, row in df.iterrows():
+        try:
+            cell_1_name = str(row.get('cell_1_name'))
+            epi_nonepi = str(row.get('epi_nonepi'))
+            bjt_diode = str(row.get('bjt_diode'))
+            device_type = str(row.get('device_type'))
+            total_diff = int(row.get('total_diff'))
+            device_layout = str(row.get('device_layout'))
+            diff1_cutoff = float(row.get('diff1_cutoff'))
+            iso_op = str(row.get('iso_op'))
+            dti_number = int(row.get('dti_number'))
+            dti_shape = str(row.get('dti_shape'))
+            dti_w = float(row.get('dti_w'))
+            ddti_w = float(row.get('ddti_w'))
+            dti_s_ddti = float(row.get('dti_s_ddti'))
+            diff1_layer = tuple(int(x) for x in str(row.get('diff1_layer')).split(',')) if row.get('diff1_layer') and pd.notna(row.get('diff1_layer')) else (0,0)
+            diff1_w = float(row.get('diff1_w'))
+            diff1_h = float(row.get('diff1_h'))
+            diff1_layer_en_iso1 = float(row.get('diff1_layer_en_iso1'))
+            diff1_well1_layer = tuple(int(x) for x in str(row.get('diff1_well1_layer')).split(',')) if row.get('diff1_well1_layer') and pd.notna(row.get('diff1_well1_layer')) else (0,0)
+            diff1_well1_en_iso1 = float(row.get('diff1_well1_en_iso1'))
+            diff2_layer = tuple(int(x) for x in str(row.get('diff2_layer')).split(',')) if row.get('diff2_layer') and pd.notna(row.get('diff2_layer')) else (0,0)
+            diff2_w = float(row.get('diff2_w'))
+            diff2_layer_en_iso1 = float(row.get('diff2_layer_en_iso1'))
+            diff2_layer_en_iso2 = float(row.get('diff2_layer_en_iso2'))
+            diff2_well1_layer = tuple(int(x) for x in str(row.get('diff2_well1_layer')).split(',')) if row.get('diff2_well1_layer') and pd.notna(row.get('diff2_well1_layer')) else (0,0)
+            diff2_well1_en_iso1 = float(row.get('diff2_well1_en_iso1'))
+            diff2_well1_en_iso2 = float(row.get('diff2_well1_en_iso2'))
+            diff2_well1_s_diff1_well1 = float(row.get('diff2_well1_s_diff1_well1'))
+            diff12_well1_layer = tuple(int(x) for x in str(row.get('diff12_well1_layer')).split(',')) if row.get('diff12_well1_layer') and pd.notna(row.get('diff12_well1_layer')) else (0,0)
+            diff12_well1_en_iso2 = float(row.get('diff12_well1_en_iso2'))
+            diff3_layer = tuple(int(x) for x in str(row.get('diff3_layer')).split(',')) if row.get('diff3_layer') and pd.notna(row.get('diff3_layer')) else (0,0)
+            diff3_w = float(row.get('diff3_w'))
+            diff3_layer_en_iso2 = float(row.get('diff3_layer_en_iso2'))
+            diff3_layer_en_iso3 = float(row.get('diff3_layer_en_iso3'))
+            diff3_well1_layer = tuple(int(x) for x in str(row.get('diff3_well1_layer')).split(',')) if row.get('diff3_well1_layer') and pd.notna(row.get('diff3_well1_layer')) else (0,0)
+            diff3_well1_en_iso2 = float(row.get('diff3_well1_en_iso2'))
+            diff3_well1_en_iso3 = float(row.get('diff3_well1_en_iso3'))
+            diff3_well1_s_diff2_well1 = float(row.get('diff3_well1_s_diff2_well1'))
+            diff123_well1_layer = tuple(int(x) for x in str(row.get('diff123_well1_layer')).split(',')) if row.get('diff123_well1_layer') and pd.notna(row.get('diff123_well1_layer')) else (0,0)
+            diff123_well1_en_iso3 = float(row.get('diff123_well1_en_iso3'))
+            diff4_layer = tuple(int(x) for x in str(row.get('diff4_layer')).split(',')) if row.get('diff4_layer') and pd.notna(row.get('diff4_layer')) else (0,0)
+            diff4_w = float(row.get('diff4_w'))
+            diff4_layer_en_iso3 = float(row.get('diff4_layer_en_iso3'))
+            diff4_layer_en_dti_sti = float(row.get('diff4_layer_en_dti_sti'))
+            diff4_well1_layer = tuple(int(x) for x in str(row.get('diff4_well1_layer')).split(',')) if row.get('diff4_well1_layer') and pd.notna(row.get('diff4_well1_layer')) else (0,0)
+            diff4_well1_en_iso3 = float(row.get('diff4_well1_en_iso3'))
+            diff4_well1_en_dti_sti = float(row.get('diff4_well1_en_dti_sti'))
+            diff4_well1_s_diff3_well1 = float(row.get('diff4_well1_s_diff3_well1'))
+            sti_w = float(row.get('sti_w'))
+            sti_h = float(row.get('sti_h'))
+            sti_cutoff = float(row.get('sti_cutoff'))
+            sti_s_dti = float(row.get('sti_s_dti'))
+            diff1_met_op = str(row.get('diff1_met_op'))
+            diff1_text = str(row.get('diff1_text'))
+            diff2_text = str(row.get('diff2_text'))
+            diff3_text = str(row.get('diff3_text'))
+            diff4_text = str(row.get('diff4_text'))
+            top_x = float(row.get('top_x'))
+            top_y = float(row.get('top_y'))
+            top_scale = float(row.get('top_scale'))
+            top_angle = float(row.get('top_angle'))
+        except Exception as e:
+            raise ValueError(f"Excel参数读取出错，请检查表头和内容是否正确，错误信息: {e}")
+        cell_1 = layout.cell(cell_1_name) or layout.create_cell(cell_1_name)
+        clear_cell(cell_1)
+
+        iso1_w = diff1_well1_en_iso1 + diff2_well1_en_iso1 + diff2_well1_s_diff1_well1
+        iso2_w = diff2_well1_en_iso2 + diff3_well1_en_iso2 + diff3_well1_s_diff2_well1
+        iso3_w = diff3_well1_en_iso3 + diff4_well1_en_iso3 + diff4_well1_s_diff3_well1
+
+        if total_diff >= 2:
+            diff1_layer = layout.layer(*diff1_layer)
+            diff1_w = diff1_w
+            diff1_h = diff1_h
+            diff1 = create_solid_shape((0, 0), diff1_w, diff1_h, diff1_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=diff1_cutoff)
+            cell_1.shapes(diff1_layer).insert(diff1)
+            create_text_label(cell_1, TEXT_LAYER, (0, 0), diff1_text, dbu, "center", 1.0, 0.0)
+            diff1_well1_layer = layout.layer(*diff1_well1_layer)
+            diff1_well1_en_diff1 = diff1_well1_en_iso1 - diff1_layer_en_iso1
+            diff1_well1_w = diff1_w + 2*diff1_well1_en_diff1
+            diff1_well1_h = diff1_h + 2*diff1_well1_en_diff1
+            diff1_well1_cutoff = diff1_cutoff + diff1_well1_en_diff1
+            diff1_well1 = create_solid_shape((0, 0), diff1_well1_w, diff1_well1_h, diff1_well1_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=diff1_well1_cutoff)
+            cell_1.shapes(diff1_well1_layer).insert(diff1_well1)
+            diff2_layer = layout.layer(*diff2_layer)
+            diff2_s_diff1 = iso1_w - diff1_layer_en_iso1 - diff2_layer_en_iso1
+            diff2_in_w = diff1_w + 2*diff2_s_diff1
+            diff2_in_h = diff1_h + 2*diff2_s_diff1
+            diff2_out_w = diff2_in_w + 2*diff2_w
+            diff2_out_h = diff2_in_h + 2*diff2_w
+            diff2_cutoff = diff1_cutoff + diff2_s_diff1
+            diff2 = create_ring((0, 0), diff2_in_w, diff2_in_h, diff2_out_w, diff2_out_h, diff2_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=diff2_cutoff, offset=diff2_w)
+            cell_1.shapes(diff2_layer).insert(diff2)
+            create_text_label(cell_1, TEXT_LAYER, (0, (diff2_in_h + diff2_out_h)/4), diff2_text, dbu, "center", 1.0, 0.0)
+            cell_1.shapes(METAL1_LAYER).insert(diff2)
+            shrinked_diff2 = diff2.sized(-um2dbu(0.04, dbu))
+            fill_with_vias(shrinked_diff2, contact_cell, cell_1, dbu, 0.09, 0.09, 0.23, 0.23, 0.0, 0.0, 0.0, 0.0)
+            diff2_well1_layer = layout.layer(*diff2_well1_layer)
+            diff2_well1_w = diff2_w - diff2_layer_en_iso1 - diff2_layer_en_iso2 + diff2_well1_en_iso1 + diff2_well1_en_iso2
+            diff2_well1_in_w = diff1_well1_w + 2*diff2_well1_s_diff1_well1
+            diff2_well1_in_h = diff1_well1_h + 2*diff2_well1_s_diff1_well1
+            diff2_well1_out_w = diff2_well1_in_w + 2*diff2_well1_w
+            diff2_well1_out_h = diff2_well1_in_h + 2*diff2_well1_w
+            diff2_well1_cutoff = diff1_well1_cutoff + diff2_well1_s_diff1_well1
+            diff2_well1 = create_ring((0, 0), diff2_well1_in_w, diff2_well1_in_h, diff2_well1_out_w, diff2_well1_out_h, diff2_well1_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=diff2_well1_cutoff, offset=diff2_well1_w)
+            cell_1.shapes(diff2_well1_layer).insert(diff2_well1)
+            diff12_well1_layer = layout.layer(*diff12_well1_layer)
+            diff12_well1_en_diff2 = diff12_well1_en_iso2 - diff2_layer_en_iso2
+            diff12_well1_w = diff2_out_w + 2*diff12_well1_en_diff2
+            diff12_well1_h = diff2_out_h + 2*diff12_well1_en_diff2
+            diff12_well1_cutoff = diff2_cutoff + diff2_w + diff12_well1_en_diff2
+            diff12_well1 = create_solid_shape((0, 0), diff12_well1_w, diff12_well1_h, diff12_well1_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=diff12_well1_cutoff)
+            cell_1.shapes(diff12_well1_layer).insert(diff12_well1)
+        if total_diff >= 3:
+            diff3_layer = layout.layer(*diff3_layer)
+            diff3_s_diff2 = iso2_w - diff2_layer_en_iso2 - diff3_layer_en_iso2
+            diff3_in_w = diff2_out_w + 2*diff3_s_diff2
+            diff3_in_h = diff2_out_h + 2*diff3_s_diff2
+            diff3_out_w = diff3_in_w + 2*diff3_w
+            diff3_out_h = diff3_in_h + 2*diff3_w
+            diff3_cutoff = diff2_cutoff + diff2_w + diff3_s_diff2
+            diff3 = create_ring((0, 0), diff3_in_w, diff3_in_h, diff3_out_w, diff3_out_h, diff3_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=diff3_cutoff, offset=diff3_w)
+            cell_1.shapes(diff3_layer).insert(diff3)
+            mark3_layer = layout.layer(5,31)
+            cell_1.shapes(mark3_layer).insert(diff3)
+            metal_stack(diff3, 'metal1', 'metal4', cell_1, layout, dbu, via_cells)
+            diff3_well1_layer = layout.layer(*diff3_well1_layer)
+            diff3_well1_w = diff3_w - diff3_layer_en_iso2 - diff3_layer_en_iso3 + diff3_well1_en_iso2 + diff3_well1_en_iso3
+            diff3_well1_in_w = diff2_well1_out_w + 2*diff3_well1_s_diff2_well1
+            diff3_well1_in_h = diff2_well1_out_h + 2*diff3_well1_s_diff2_well1
+            diff3_well1_out_w = diff3_well1_in_w + 2*diff3_well1_w
+            diff3_well1_out_h = diff3_well1_in_h + 2*diff3_well1_w
+            diff3_well1_cutoff = diff2_well1_cutoff + diff2_well1_w + diff3_well1_s_diff2_well1
+            diff3_well1 = create_ring((0, 0), diff3_well1_in_w, diff3_well1_in_h, diff3_well1_out_w, diff3_well1_out_h, diff3_well1_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=diff3_well1_cutoff, offset=diff3_well1_w)
+            cell_1.shapes(diff3_well1_layer).insert(diff3_well1)
+            diff123_well1_layer = layout.layer(*diff123_well1_layer)
+            diff123_well1_en_diff3 = diff123_well1_en_iso3 - diff3_layer_en_iso3
+            diff123_well1_w = diff3_out_w + 2*diff123_well1_en_diff3
+            diff123_well1_h = diff3_out_h + 2*diff123_well1_en_diff3
+            diff123_well1_cutoff = diff3_cutoff + diff3_w + diff123_well1_en_diff3
+            diff123_well1 = create_solid_shape((0, 0), diff123_well1_w, diff123_well1_h, diff123_well1_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=diff123_well1_cutoff)
+            cell_1.shapes(diff123_well1_layer).insert(diff123_well1)
+        if total_diff >= 4:
+            diff4_layer = layout.layer(*diff4_layer)
+            diff4_s_diff3 = iso3_w - diff3_layer_en_iso3 - diff4_layer_en_iso3
+            diff4_in_w = diff3_out_w + 2*diff4_s_diff3
+            diff4_in_h = diff3_out_h + 2*diff4_s_diff3
+            diff4_out_w = diff4_in_w + 2*diff4_w
+            diff4_out_h = diff4_in_h + 2*diff4_w
+            diff4_cutoff = diff3_cutoff + diff3_w + diff4_s_diff3
+            diff4 = create_ring((0, 0), diff4_in_w, diff4_in_h, diff4_out_w, diff4_out_h, diff4_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=diff4_cutoff, offset=diff4_w)
+            cell_1.shapes(diff4_layer).insert(diff4)
+            diff4_well1_layer = layout.layer(*diff4_well1_layer)
+            diff4_well1_w = diff4_w - diff4_layer_en_iso3 - diff4_layer_en_dti_sti + diff4_well1_en_iso3 + diff4_well1_en_dti_sti
+            diff4_well1_in_w = diff3_well1_out_w + 2*diff4_well1_s_diff3_well1
+            diff4_well1_in_h = diff3_well1_out_h + 2*diff4_well1_s_diff3_well1
+            diff4_well1_out_w = diff4_well1_in_w + 2*diff4_well1_w
+            diff4_well1_out_h = diff4_well1_in_h + 2*diff4_well1_w
+            diff4_well1_cutoff = diff3_well1_cutoff + diff3_well1_w + diff4_well1_s_diff3_well1
+            diff4_well1 = create_ring((0, 0), diff4_well1_in_w, diff4_well1_in_h, diff4_well1_out_w, diff4_well1_out_h, diff4_well1_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=diff4_well1_cutoff, offset=diff4_well1_w)
+            cell_1.shapes(diff4_well1_layer).insert(diff4_well1)
+
+        if iso_op == "sti":
+            if total_diff >= 2:
+                sti_iso1_in_layer = layout.layer(1,0)
+                sti_iso1_in_w = diff1_w - 2*diff1_layer_en_iso1
+                sti_iso1_in_h = diff1_h - 2*diff1_layer_en_iso1
+                sti_iso1_cutoff = diff1_cutoff - diff1_layer_en_iso1
+                sti_iso1_in = create_solid_shape((0, 0), sti_iso1_in_w, sti_iso1_in_h, sti_iso1_in_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=sti_iso1_cutoff)
+                cell_1.shapes(sti_iso1_in_layer).insert(sti_iso1_in)
+                sti_iso2_layer = layout.layer(1,0)
+                sti_iso2_in_w = diff2_in_w + 2*diff2_layer_en_iso1
+                sti_iso2_in_h = diff2_in_h + 2*diff2_layer_en_iso1
+                sti_iso2_out_w = diff2_out_w - 2*diff2_layer_en_iso2
+                sti_iso2_out_h = diff2_out_h - 2*diff2_layer_en_iso2
+                sti_iso2_cutoff = diff2_cutoff + diff2_layer_en_iso1
+                sti_iso2_w = diff2_w - diff2_layer_en_iso1 - diff2_layer_en_iso2
+                sti_iso2 = create_ring((0, 0), sti_iso2_in_w, sti_iso2_in_h, sti_iso2_out_w, sti_iso2_out_h, sti_iso2_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=sti_iso2_cutoff, offset=sti_iso2_w)
+                cell_1.shapes(sti_iso2_layer).insert(sti_iso2)
+            if total_diff >= 3:
+                sti_iso3_layer = layout.layer(1,0)
+                sti_iso3_in_w = diff3_in_w + 2*diff3_layer_en_iso2
+                sti_iso3_in_h = diff3_in_h + 2*diff3_layer_en_iso2
+                sti_iso3_out_w = diff3_out_w - 2*diff3_layer_en_iso3
+                sti_iso3_out_h = diff3_out_h - 2*diff3_layer_en_iso3
+                sti_iso3_cutoff = diff3_cutoff + diff3_layer_en_iso2
+                sti_iso3_w = diff3_w - diff3_layer_en_iso2 - diff3_layer_en_iso3
+                sti_iso3 = create_ring((0, 0), sti_iso3_in_w, sti_iso3_in_h, sti_iso3_out_w, sti_iso3_out_h, sti_iso3_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=sti_iso3_cutoff, offset=sti_iso3_w)
+                cell_1.shapes(sti_iso3_layer).insert(sti_iso3)
+            if total_diff >= 4:
+                sti_sti_layer = layout.layer(1,0)
+                sti_sti_in_w = diff4_in_w + 2*diff4_layer_en_iso3
+                sti_sti_in_h = diff4_in_h + 2*diff4_layer_en_iso3
+                sti_sti_out_w = sti_w
+                sti_sti_out_h = sti_h
+                sti_sti_cutoff = sti_cutoff
+                sti_sti_w = diff4_w - diff4_layer_en_iso3 - diff4_layer_en_dti_sti
+                sti_sti = create_ring((0, 0), sti_sti_in_w, sti_sti_in_h, sti_sti_out_w, sti_sti_out_h, sti_sti_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=sti_sti_cutoff, offset=sti_sti_w)
+                cell_1.shapes(sti_sti_layer).insert(sti_sti)
+        elif iso_op == "hto":
+            if total_diff >= 2:
+                hto_iso1_layer = layout.layer(131,32)
+                hto_iso1_in_w = diff1_w - 2*diff1_layer_en_iso1
+                hto_iso1_in_h = diff1_h - 2*diff1_layer_en_iso1
+                hto_iso1_out_w = hto_iso1_in_w + 2*iso1_w
+                hto_iso1_out_h = hto_iso1_in_h + 2*iso1_w
+                hto_iso1_cutoff = diff1_cutoff - diff1_layer_en_iso1
+                hto_iso1 = create_ring((0, 0), hto_iso1_in_w, hto_iso1_in_h, hto_iso1_out_w, hto_iso1_out_h, hto_iso1_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=hto_iso1_cutoff, offset=iso1_w)
+                cell_1.shapes(hto_iso1_layer).insert(hto_iso1)
+            if total_diff >= 3:
+                hto_iso2_layer = layout.layer(131,32)
+                hto_iso2_in_w = diff2_out_w - 2*diff2_layer_en_iso2
+                hto_iso2_in_h = diff2_out_h - 2*diff2_layer_en_iso2
+                hto_iso2_out_w = hto_iso2_in_w + 2*iso2_w
+                hto_iso2_out_h = hto_iso2_in_h + 2*iso2_w
+                hto_iso2_cutoff = diff12_well1_cutoff - diff12_well1_en_iso2
+                hto_iso2 = create_ring((0, 0), hto_iso2_in_w, hto_iso2_in_h, hto_iso2_out_w, hto_iso2_out_h, hto_iso2_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=hto_iso2_cutoff, offset=iso2_w)
+                cell_1.shapes(hto_iso2_layer).insert(hto_iso2)
+            if total_diff >= 4:
+                hto_iso3_layer = layout.layer(131,32)
+                hto_iso3_in_w = diff3_out_w - 2*diff3_layer_en_iso3
+                hto_iso3_in_h = diff3_out_h - 2*diff3_layer_en_iso3
+                hto_iso3_out_w = hto_iso3_in_w + 2*iso3_w
+                hto_iso3_out_h = hto_iso3_in_h + 2*iso3_w
+                hto_iso3_cutoff = diff123_well1_cutoff - diff123_well1_en_iso3
+                hto_iso3 = create_ring((0, 0), hto_iso3_in_w, hto_iso3_in_h, hto_iso3_out_w, hto_iso3_out_h, hto_iso3_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=hto_iso3_cutoff, offset=iso3_w)
+                cell_1.shapes(hto_iso3_layer).insert(hto_iso3)
+            hto_sti_layer = layout.layer(1,0)
+            hto_sti_w = sti_w
+            hto_sti_h = sti_h
+            hto_sti_cutoff = sti_cutoff
+            hto_sti = create_solid_shape((0, 0), hto_sti_w, hto_sti_h, hto_sti_layer, dbu, shape_type=device_layout, npoints=64, corner_radius=hto_sti_cutoff)
+            cell_1.shapes(hto_sti_layer).insert(hto_sti)
+
+        if dti_number >= 1:
+            dti_layer = layout.layer(17,30)
+            dti_in_w = sti_w + 2*sti_s_dti
+            dti_in_h = sti_h + 2*sti_s_dti
+            dti_out_w = dti_in_w + 2*dti_w
+            dti_out_h = dti_in_h + 2*dti_w
+            dti_cutoff = sti_cutoff + sti_s_dti
+            dti = create_ring((0, 0), dti_in_w, dti_in_h, dti_out_w, dti_out_h, dti_layer, dbu, shape_type=dti_shape, npoints=64, corner_radius=dti_cutoff, offset=dti_w)
+            cell_1.shapes(dti_layer).insert(dti)
+            cell_1.shapes(PPLUS_LAYER).insert(dti)
+        if dti_number >= 2:
+            ddti_layer = layout.layer(17,30)
+            ddti_in_w = dti_out_w + 2*dti_s_ddti
+            ddti_in_h = dti_out_h + 2*dti_s_ddti
+            ddti_out_w = ddti_in_w + 2*ddti_w
+            ddti_out_h = ddti_in_h + 2*ddti_w
+            ddti_cutoff = dti_cutoff + dti_w + dti_s_ddti
+            ddti = create_ring((0, 0), ddti_in_w, ddti_in_h, ddti_out_w, ddti_out_h, ddti_layer, dbu, shape_type=dti_shape, npoints=64, corner_radius=ddti_cutoff, offset=ddti_w)
+            cell_1.shapes(ddti_layer).insert(ddti)
+            cell_1.shapes(PPLUS_LAYER).insert(ddti)
+
+        trans = pya.ICplxTrans(
+            top_scale, top_angle, False, um2dbu(top_x, dbu), um2dbu(top_y, dbu)
+        )
+        top_cell.insert(pya.CellInstArray(cell_1.cell_index(), trans))
+
+main() 
