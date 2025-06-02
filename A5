@@ -1,0 +1,314 @@
+import pya
+
+def get_shapes_from_cell_layer(layout, cell, layer_info, transform=None):
+    """
+    从指定cell的指定层获取所有形状，并应用变换
+    
+    参数:
+    - layout: pya.Layout对象
+    - cell: 源cell对象
+    - layer_info: 层信息，可以是(layer, datatype)元组或layer_index
+    - transform: 变换矩阵，如果cell被实例化时有变换
+    
+    返回:
+    - pya.Region对象，包含所有形状
+    """
+    # 获取层索引
+    if isinstance(layer_info, tuple):
+        layer_idx = layout.layer(layer_info[0], layer_info[1])
+    else:
+        layer_idx = layer_info
+    
+    # 获取形状
+    shapes = cell.shapes(layer_idx)
+    region = pya.Region()
+    
+    # 遍历所有形状并添加到region
+    for shape in shapes.each():
+        if shape.is_polygon():
+            poly = shape.polygon
+            if transform:
+                poly = poly.transformed(transform)
+            region.insert(poly)
+        elif shape.is_box():
+            box = shape.box
+            poly = pya.Polygon(box)
+            if transform:
+                poly = poly.transformed(transform)
+            region.insert(poly)
+        elif shape.is_path():
+            path = shape.path
+            poly = path.polygon()
+            if transform:
+                poly = poly.transformed(transform)
+            region.insert(poly)
+    
+    return region
+
+def get_cell_instances_transforms(top_cell, target_cell):
+    """
+    获取目标cell在top_cell中所有实例的变换信息
+    
+    参数:
+    - top_cell: 顶层cell
+    - target_cell: 目标cell
+    
+    返回:
+    - 变换列表
+    """
+    transforms = []
+    
+    # 遍历top_cell中的所有实例
+    for inst in top_cell.each_inst():
+        if inst.cell == target_cell:
+            # 获取实例的变换
+            if inst.is_regular_array():
+                # 处理数组实例
+                array = inst.cell_inst_array
+                for i in range(array.na):
+                    for j in range(array.nb):
+                        trans = array.transform_into(top_cell, pya.Point(i, j))
+                        transforms.append(trans)
+            else:
+                # 单个实例
+                trans = inst.cell_inst().transform_into(top_cell, pya.Point(0, 0))
+                transforms.append(trans)
+    
+    return transforms
+
+def collect_shapes_from_cell_instances(layout, top_cell, target_cell, layer_info):
+    """
+    收集目标cell在top_cell中所有实例的指定层形状
+    
+    参数:
+    - layout: Layout对象
+    - top_cell: 顶层cell
+    - target_cell: 目标cell
+    - layer_info: 层信息
+    
+    返回:
+    - pya.Region对象，包含所有变换后的形状
+    """
+    result_region = pya.Region()
+    
+    # 获取基础形状（未变换）
+    base_shapes = get_shapes_from_cell_layer(layout, target_cell, layer_info)
+    
+    # 获取所有实例的变换
+    transforms = get_cell_instances_transforms(top_cell, target_cell)
+    
+    # 应用变换并合并
+    for transform in transforms:
+        transformed_shapes = base_shapes.transformed(transform)
+        result_region += transformed_shapes
+    
+    return result_region
+
+def boolean_operation_between_cells(layout, top_cell, cellA, cellB, 
+                                  layerA_info, layerB_info, 
+                                  operation='and', 
+                                  result_layer_info=None):
+    """
+    在两个cell的指定层之间执行boolean操作
+    
+    参数:
+    - layout: Layout对象
+    - top_cell: 顶层cell
+    - cellA, cellB: 要操作的两个cell
+    - layerA_info, layerB_info: 层信息，格式为(layer, datatype)或layer_index
+    - operation: Boolean操作类型 ('and', 'or', 'not', 'xor')
+    - result_layer_info: 结果层信息，如果为None则使用layerA_info
+    
+    返回:
+    - pya.Region对象，包含操作结果
+    """
+    
+    # 收集cellA中指定层的所有形状
+    regionA = collect_shapes_from_cell_instances(layout, top_cell, cellA, layerA_info)
+    
+    # 收集cellB中指定层的所有形状  
+    regionB = collect_shapes_from_cell_instances(layout, top_cell, cellB, layerB_info)
+    
+    # 执行Boolean操作
+    if operation.lower() == 'and':
+        result = regionA & regionB
+    elif operation.lower() == 'or':
+        result = regionA | regionB
+    elif operation.lower() == 'not':
+        result = regionA - regionB
+    elif operation.lower() == 'xor':
+        result = regionA ^ regionB
+    else:
+        raise ValueError(f"不支持的Boolean操作: {operation}")
+    
+    return result
+
+def insert_region_to_cell(layout, cell, region, layer_info):
+    """
+    将region中的形状插入到指定cell的指定层
+    
+    参数:
+    - layout: Layout对象
+    - cell: 目标cell
+    - region: 要插入的region
+    - layer_info: 层信息
+    """
+    # 获取层索引
+    if isinstance(layer_info, tuple):
+        layer_idx = layout.layer(layer_info[0], layer_info[1])
+    else:
+        layer_idx = layer_info
+    
+    # 插入所有多边形
+    shapes = cell.shapes(layer_idx)
+    for poly in region.each():
+        shapes.insert(poly)
+
+def complete_boolean_workflow(layout, top_cell, cellA, cellB,
+                            layerA_info, layerB_info,
+                            operation='and',
+                            result_layer_info=None):
+    """
+    完整的Boolean操作工作流程
+    
+    参数同boolean_operation_between_cells
+    """
+    # 执行Boolean操作
+    result_region = boolean_operation_between_cells(
+        layout, top_cell, cellA, cellB,
+        layerA_info, layerB_info, operation, result_layer_info
+    )
+    
+    # 确定结果层
+    if result_layer_info is None:
+        result_layer_info = layerA_info
+    
+    # 将结果插入到top_cell
+    insert_region_to_cell(layout, top_cell, result_region, result_layer_info)
+    
+    return result_region
+
+# 使用示例
+def example_usage():
+    """
+    完整的使用示例
+    """
+    # 创建layout
+    layout = pya.Layout()
+    layout.dbu = 0.001  # 1nm精度
+    
+    # 创建顶层cell
+    top_cell = layout.create_cell("TOP")
+    
+    # 创建cellA和cellB
+    cellA = layout.create_cell("CELL_A")
+    cellB = layout.create_cell("CELL_B")
+    
+    # 在cellA中创建一些形状（layer 1:0）
+    layer1_idx = layout.layer(1, 0)
+    shapes_A = cellA.shapes(layer1_idx)
+    shapes_A.insert(pya.Box(0, 0, 1000, 1000))      # 1μm x 1μm正方形
+    shapes_A.insert(pya.Box(500, 500, 1500, 1500))  # 重叠的正方形
+    
+    # 在cellB中创建一些形状（layer 2:0）
+    layer2_idx = layout.layer(2, 0)
+    shapes_B = cellB.shapes(layer2_idx)
+    shapes_B.insert(pya.Box(250, 250, 1250, 1250))  # 与cellA重叠的区域
+    
+    # 将cellA和cellB实例化到top_cell中
+    trans_A = pya.Trans(pya.Point(0, 0))
+    trans_B = pya.Trans(pya.Point(300, 300))  # 偏移300nm
+    
+    top_cell.insert(pya.CellInstArray(cellA.cell_index(), trans_A))
+    top_cell.insert(pya.CellInstArray(cellB.cell_index(), trans_B))
+    
+    # 执行Boolean操作示例
+    
+    # 1. AND操作 - 求交集
+    print("执行AND操作...")
+    and_result = complete_boolean_workflow(
+        layout, top_cell, cellA, cellB,
+        (1, 0), (2, 0),  # layerA: (1,0), layerB: (2,0)
+        'and',
+        (10, 0)  # 结果保存到layer (10,0)
+    )
+    
+    # 2. OR操作 - 求并集
+    print("执行OR操作...")
+    or_result = complete_boolean_workflow(
+        layout, top_cell, cellA, cellB,
+        (1, 0), (2, 0),
+        'or',
+        (11, 0)  # 结果保存到layer (11,0)
+    )
+    
+    # 3. NOT操作 - 求差集（A-B）
+    print("执行NOT操作...")
+    not_result = complete_boolean_workflow(
+        layout, top_cell, cellA, cellB,
+        (1, 0), (2, 0),
+        'not',
+        (12, 0)  # 结果保存到layer (12,0)
+    )
+    
+    # 4. XOR操作 - 求异或
+    print("执行XOR操作...")
+    xor_result = complete_boolean_workflow(
+        layout, top_cell, cellA, cellB,
+        (1, 0), (2, 0),
+        'xor',
+        (13, 0)  # 结果保存到layer (13,0)
+    )
+    
+    # 保存结果
+    layout.write("boolean_result.gds")
+    print("Boolean操作完成！结果已保存到 boolean_result.gds")
+    print(f"AND结果包含 {len(list(and_result.each()))} 个多边形")
+    print(f"OR结果包含 {len(list(or_result.each()))} 个多边形")
+    print(f"NOT结果包含 {len(list(not_result.each()))} 个多边形")
+    print(f"XOR结果包含 {len(list(xor_result.each()))} 个多边形")
+
+# 高级用法示例
+def advanced_example():
+    """
+    高级用法：处理多个实例和复杂变换
+    """
+    layout = pya.Layout()
+    layout.dbu = 0.001
+    
+    top_cell = layout.create_cell("TOP_ADVANCED")
+    cellA = layout.create_cell("UNIT_A")
+    cellB = layout.create_cell("UNIT_B")
+    
+    # 创建形状
+    layer1_idx = layout.layer(1, 0)
+    layer2_idx = layout.layer(2, 0)
+    
+    cellA.shapes(layer1_idx).insert(pya.Box(0, 0, 500, 500))
+    cellB.shapes(layer2_idx).insert(pya.Box(200, 200, 700, 700))
+    
+    # 创建多个实例，包括数组和变换
+    # cellA的多个实例
+    top_cell.insert(pya.CellInstArray(cellA.cell_index(), pya.Trans(0, 0)))
+    top_cell.insert(pya.CellInstArray(cellA.cell_index(), pya.Trans(1000, 0)))
+    top_cell.insert(pya.CellInstArray(cellA.cell_index(), pya.Trans(0, 1000)))
+    
+    # cellB的旋转实例
+    trans_rot = pya.Trans(1, False, 500, 500)  # 90度旋转
+    top_cell.insert(pya.CellInstArray(cellB.cell_index(), trans_rot))
+    
+    # 执行Boolean操作
+    result = complete_boolean_workflow(
+        layout, top_cell, cellA, cellB,
+        (1, 0), (2, 0),
+        'and',
+        (20, 0)
+    )
+    
+    layout.write("advanced_boolean.gds")
+    print("高级Boolean操作完成！")
+
+if __name__ == "__main__":
+    example_usage()
+    print("\n" + "="*50)
+    advanced_example()
