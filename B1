@@ -1,0 +1,255 @@
+import pya
+
+def chamfer_polygon(poly, cut_length):
+    """
+    针对传入的多边形 poly（类型 pya.DPolygon），
+    对其所有顶点执行斜切操作，即在每个角处沿两边各偏移 cut_length，
+    返回生成的新多边形。
+    此函数假设 polygon 的边均为水平或垂直方向。
+    """
+    pts = [pt for pt in poly.each_point()]
+    n = len(pts)
+    new_pts = []
+    for i in range(n):
+        prev = pts[i - 1]
+        curr = pts[i]
+        next = pts[(i + 1) % n]
+        # 针对prev->curr边
+        if curr.x != prev.x:
+            # 水平边
+            sign_prev = 1 if (curr.x - prev.x) > 0 else -1
+            new_point1 = pya.Point(curr.x - sign_prev * cut_length, curr.y)
+        else:
+            # 垂直边
+            sign_prev = 1 if (curr.y - prev.y) > 0 else -1
+            new_point1 = pya.Point(curr.x, curr.y - sign_prev * cut_length)
+        # 针对curr->next边
+        if next.x != curr.x:
+            sign_next = 1 if (next.x - curr.x) > 0 else -1
+            new_point2 = pya.Point(curr.x + sign_next * cut_length, curr.y)
+        else:
+            sign_next = 1 if (next.y - curr.y) > 0 else -1
+            new_point2 = pya.Point(curr.x, curr.y + sign_next * cut_length)
+        new_pts.append(new_point1)
+        new_pts.append(new_point2)
+    return pya.DPolygon(new_pts)
+
+def process_compound_polygon(poly, cut_length):
+    """
+    针对复合多边形 poly（包含外轮廓和内孔）的处理，仅对所有内孔进行斜切操作，
+    返回新的复合多边形。
+    """
+    # 保留外轮廓
+    outer = poly.outer()
+    new_poly = pya.DPolygon(outer)
+    new_poly.clear_holes()  # 清空原有内孔（如果有）
+    
+    # 对每个内孔进行斜切，再加入到新多边形中
+    for hole in poly.holes():
+        new_hole = chamfer_polygon(hole, cut_length)
+        new_poly.insert_hole(new_hole)
+    return new_poly
+
+def main_compound():
+    layout = pya.Layout()
+    layout.read("input.gds")  # 修改为你的 GDS 文件
+    # 数据库单位设定：如果存储单位为 nm，则 1 μm = 1000；如果已经是 μm，请直接用 1.
+    unit = 1  # 请根据实际情况调整
+    cut_length = 1 * unit
+
+    target_layer = layout.layer(1, 0)
+
+    for cell in layout.each_cell():
+        shapes = cell.shapes(target_layer)
+        mods = []  # 存储待替换的（原 shape, 新 polygon）
+        for shape in shapes.each():
+            if not shape.is_polygon():
+                continue
+            poly = shape.polygon
+            if poly.holes():  # 仅针对复合多边形处理内孔
+                new_poly = process_compound_polygon(poly, cut_length)
+                mods.append((shape, new_poly))
+        for old_shape, new_poly in mods:
+            shapes.delete(old_shape)
+            shapes.insert(new_poly)
+    layout.write("output_compound.gds")
+    print("复合多边形内孔的斜切已完成，输出结果存于 output_compound.gds")
+
+if __name__ == "__main__":
+    main_compound()
+
+import pya
+
+def chamfer_polygon(poly, cut_length):
+    pts = [pt for pt in poly.each_point()]
+    n = len(pts)
+    new_pts = []
+    for i in range(n):
+        prev = pts[i - 1]
+        curr = pts[i]
+        next = pts[(i + 1) % n]
+        # 处理前边
+        if curr.x != prev.x:
+            sign_prev = 1 if (curr.x - prev.x) > 0 else -1
+            new_point1 = pya.Point(curr.x - sign_prev * cut_length, curr.y)
+        else:
+            sign_prev = 1 if (curr.y - prev.y) > 0 else -1
+            new_point1 = pya.Point(curr.x, curr.y - sign_prev * cut_length)
+        # 处理后边
+        if next.x != curr.x:
+            sign_next = 1 if (next.x - curr.x) > 0 else -1
+            new_point2 = pya.Point(curr.x + sign_next * cut_length, curr.y)
+        else:
+            sign_next = 1 if (next.y - curr.y) > 0 else -1
+            new_point2 = pya.Point(curr.x, curr.y + sign_next * cut_length)
+        new_pts.append(new_point1)
+        new_pts.append(new_point2)
+    return pya.DPolygon(new_pts)
+
+def is_polygon_inside(inner_poly, outer_poly):
+    """
+    检查 inner_poly 的所有顶点是否都位于 outer_poly 内部，
+    此方法借助 Region 以实现点内检测。
+    """
+    reg = pya.Region()
+    reg.insert(outer_poly)
+    for pt in inner_poly.each_point():
+        if not reg.is_inside(pt):
+            return False
+    return True
+
+def main_separate():
+    layout = pya.Layout()
+    layout.read("input.gds")
+    unit = 1  # 修改为对应数据库单位换算，例如1 μm = 1000（如果 DBU 为 nm）
+    cut_length = 1 * unit
+
+    target_layer = layout.layer(1, 0)
+
+    for cell in layout.each_cell():
+        shapes = cell.shapes(target_layer)
+        mods = []
+        # 将所有多边形存入列表便于两两比较
+        all_polys = [shape for shape in shapes.each() if shape.is_polygon()]
+        for shape in all_polys:
+            poly = shape.polygon
+            # 检查是否存在另一个多边形完全包含该多边形
+            is_inner = False
+            for other_shape in all_polys:
+                if other_shape == shape:
+                    continue
+                outer_poly = other_shape.polygon
+                if is_polygon_inside(poly, outer_poly):
+                    is_inner = True
+                    break
+            if is_inner:
+                new_poly = chamfer_polygon(poly, cut_length)
+                mods.append((shape, new_poly))
+        for old_shape, new_poly in mods:
+            shapes.delete(old_shape)
+            shapes.insert(new_poly)
+    layout.write("output_separate.gds")
+    print("分离方式的内轮廓斜切已完成，输出结果存于 output_separate.gds")
+
+if __name__ == "__main__":
+    main_separate()
+import pya
+import math
+
+def left_hand_normal(p0, p1):
+    """
+    对于从 p0 指向 p1 的边，假设该边为直线（水平或垂直），
+    返回该边的左手单位法向量（左手旋转 90°），
+    对于内孔（通常为顺时针），此向量正好指向环的材料区域。
+    """
+    dx = p1.x - p0.x
+    dy = p1.y - p0.y
+    norm = math.hypot(dx, dy)
+    if norm == 0:
+        return pya.DPoint(0, 0)
+    return pya.DPoint(-dy / norm, dx / norm)
+
+def generate_triangle_at_corner(prev_pt, curr_pt, next_pt, cut_length):
+    """
+    在内孔角点 curr_pt 处生成一个等腰直角三角形：
+      - 三角形的直角顶点为 curr_pt
+      - 分别沿上一边和下一边按照内孔外侧（左侧）方向偏移 cut_length 得到其余两个顶点
+    """
+    # 注意：这里将 pya.Point 转换为 pya.DPoint 来使用浮点计算
+    curr = pya.DPoint(curr_pt.x, curr_pt.y)
+    # 计算上一边（prev_pt -> curr_pt）的左手单位法向量
+    nh1 = left_hand_normal(prev_pt, curr_pt)
+    # 计算下一边（curr_pt -> next_pt）的左手单位法向量
+    nh2 = left_hand_normal(curr_pt, next_pt)
+    # 得到两个偏移点
+    p1 = pya.DPoint(curr.x + nh1.x * cut_length, curr.y + nh1.y * cut_length)
+    p2 = pya.DPoint(curr.x + nh2.x * cut_length, curr.y + nh2.y * cut_length)
+    # 用这三个点构成三角形，多边形的顶点顺序可为 [curr, p1, p2]
+    return pya.DPolygon([curr, p1, p2])
+
+def process_compound_polygon_triangles(poly, cut_length):
+    """
+    针对复合多边形 poly（包含外轮廓以及一个或多个内孔），
+    对内孔的每个角点，生成一个边长为 cut_length 的等腰直角三角形，
+    将所有这些三角形的区域合并后从原区域中减去，以达到内孔角切除的效果。
+    返回布尔运算后的 Region。
+    """
+    # 将复合多边形整个转换为 Region
+    region_orig = pya.Region(poly)
+    tri_region = pya.Region()
+    
+    # 遍历所有内孔（holes）
+    for hole in poly.holes():
+        pts = [pt for pt in hole.each_point()]
+        n = len(pts)
+        # 假设内孔为矩形，则 n 应为 4
+        for i in range(n):
+            prev_pt = pts[i - 1]         # 前一个顶点
+            curr_pt = pts[i]             # 当前角点
+            next_pt = pts[(i + 1) % n]     # 后一个顶点
+            # 生成三角形（注意 Region.insert 接收的是 pya.Polygon，
+            # 因此这里将 DPolygon 转换为 Polygon，要求布局单位为整数）
+            tri_dpoly = generate_triangle_at_corner(prev_pt, curr_pt, next_pt, cut_length)
+            tri_poly = tri_dpoly.to_polygon()  # 转换为 Polygon
+            tri_region.insert(tri_poly)
+    
+    # 从原区域中减去这些三角形区域
+    region_orig -= tri_region
+    return region_orig
+
+def main_triangles():
+    # 创建布局并读取 GDS 文件（请修改文件名）
+    layout = pya.Layout()
+    layout.read("input.gds")
+    # 注意单位转换：如果 DBU 为 nm，则 1 μm = 1000；若 DBU 已经为 μm，则 unit = 1.
+    unit = 1
+    cut_length = 1 * unit  # 这里 1 μm 的长度
+
+    target_layer = layout.layer(1, 0)
+    
+    # 遍历每个 cell
+    for cell in layout.each_cell():
+        shapes = cell.shapes(target_layer)
+        mods = []  # 用于存储需要替换的 shape 及处理后的结果
+        for shape in shapes.each():
+            if not shape.is_polygon():
+                continue
+            poly = shape.polygon
+            # 仅针对含内孔（环）的复合多边形进行处理
+            if poly.holes():
+                new_region = process_compound_polygon_triangles(poly, cut_length)
+                mods.append((shape, new_region))
+        
+        # 替换原有的 shape
+        for old_shape, new_region in mods:
+            shapes.delete(old_shape)
+            # new_region 可能包含多个多边形，将它们依次插入
+            for poly in new_region.each():
+                shapes.insert(poly)
+    
+    # 保存修改后的文件（请修改输出文件名）
+    layout.write("output_triangles.gds")
+    print("内角加三角形完成，输出文件：output_triangles.gds")
+    
+if __name__ == "__main__":
+    main_triangles()
