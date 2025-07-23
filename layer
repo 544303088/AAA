@@ -1,0 +1,30 @@
+import pya
+
+lv = pya.LayoutView.current()
+cv = lv.active_cellview()
+layout = cv.layout()
+
+layer_map = {3: 30, 4: 14, 5: 25}
+layers_to_delete = [7, 8]
+
+for cell in layout.each_cell():
+    # 1. 处理layer 3/4/5的转换
+    for old_layer, new_layer in layer_map.items():
+        for li in layout.layer_infos():
+            if li.layer == old_layer:
+                old_ly = layout.layer(li)
+                new_li = pya.LayerInfo(new_layer, li.datatype)
+                new_ly = layout.layer(new_li)
+                # 拷贝所有图形到新layer
+                shapes = list(cell.shapes(old_ly))
+                for shape in shapes:
+                    cell.shapes(new_ly).insert(shape)
+                # 删除原layer内容
+                cell.shapes(old_ly).clear()
+
+    # 2. 删除layer 7和8的所有data type
+    for li in layout.layer_infos():
+        if li.layer in layers_to_delete:
+            ly = layout.layer(li)
+            cell.shapes(ly).clear()
+
